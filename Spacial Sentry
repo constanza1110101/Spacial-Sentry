@@ -1,0 +1,518 @@
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
+use ndarray_stats::QuantileExt;
+use ndarray_linalg::{Inverse, UPLO};
+use rand::prelude::*;
+use rand_distr::{Distribution, Normal, Uniform};
+use plotters::prelude::*;
+use std::error::Error;
+use std::path::PathBuf;
+use serde::{Serialize, Deserialize};
+use std::fs::File;
+use std::io::{Read, Write};
+
+#[derive(Debug, Serialize, Deserialize)]
+enum DetectionMethod {
+    IsolationForest,
+    LocalOutlierFactor,
+    Mahalanobis,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct MahalanobisBackground {
+    mean: Array1<f64>,
+    cov: Array2<f64>,
+    inv_cov: Array2<f64>,
+}
+
+impl MahalanobisBackground {
+    fn new(data: &Array2<f64>) -> Self {
+        let n_samples = data.shape()[0] as f64;
+        let mean = data.mean_axis(Axis(0)).unwrap();
+        
+        // Calculate covariance matrix
+        let mut cov = Array2::<f64>::zeros((data.shape()[1], data.shape()[1]));
+        
+        for i in 0..data.shape()[0] {
+            let row = data.row(i);
+            let diff = &row - &mean;
+            let outer_product = diff.clone().into_shape((diff.len(), 1)).unwrap() 
+                * diff.clone().into_shape((1, diff.len())).unwrap();
+            cov += &outer_product;
+        }
+        
+        cov /= n_samples - 1.0;
+        
+        // Calculate inverse covariance matrix
+        let inv_cov = cov.clone().inv().unwrap();
+        
+        MahalanobisBackground { mean, cov, inv_cov }
+    }
+    
+    fn distance(&self, point: ArrayView1<f64>) -> f64 {
+        let diff = point - &self.mean;
+        let product = diff.dot(&self.inv_cov).dot(&diff);
+        product.sqrt()
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct IsolationTree {
+    split_feature: Option<usize>,
+    split_value: Option<f64>,
+    left: Option<Box<IsolationTree>>,
+    right: Option<Box<IsolationTree>>,
+    height: usize,
+    size: usize,
+}
+
+impl IsolationTree {
+    fn new(data: &Array2<f64>, height: usize, max_height: usize, rng: &mut ThreadRng) -> Self {
+        let n_samples = data.shape()[0];
+        let n_features = data.shape()[1];
+        
+        // If only one sample or reached max height, create leaf node
+        if n_samples <= 1 || height >= max_height {
+            return IsolationTree {
+                split_feature: None,
+                split_value: None,
+                left: None,
+                right: None,
+                height,
+                size: n_samples,
+            };
+        }
+        
+        // Randomly select a feature
+        let split_feature = rng.gen_range(0..n_features);
+        
+        // Find min and max values for the feature
+        let feature_values = data.column(split_feature);
+        let min_val = *feature_values.min().unwrap();
+        let max_val = *feature_values.max().unwrap();
+        
+        // If all values are the same, create leaf node
+        if (max_val - min_val).abs() < 1e-10 {
+            return IsolationTree {
+                split_feature: None,
+                split_value: None,
+                left: None,
+                right: None,
+                height,
+                size: n_samples,
+            };
+        }
+        
+        // Randomly select a split value
+        let split_value = rng.gen_range(min_val..max_val);
+        
+        // Split the data
+        let left_indices: Vec<usize> = (0..n_samples)
+            .filter(|&i| data[[i, split_feature]] < split_value)
+            .collect();
+        
+        let right_indices: Vec<usize> = (0..n_samples)
+            .filter(|&i| data[[i, split_feature]] >= split_value)
+            .collect();
+        
+        let left_data = if !left_indices.is_empty() {
+            let mut left = Array2::zeros((left_indices.len(), n_features));
+            for (i, &idx) in left_indices.iter().enumerate() {
+                left.row_mut(i).assign(&data.row(idx));
+            }
+            left
+        } else {
+            Array2::zeros((0, n_features))
+        };
+        
+        let right_data = if !right_indices.is_empty() {
+            let mut right = Array2::zeros((right_indices.len(), n_features));
+            for (i, &idx) in right_indices.iter().enumerate() {
+                right.row_mut(i).assign(&data.row(idx));
+            }
+            right
+        } else {
+            Array2::zeros((0, n_features))
+        };
+        
+        // Create child nodes
+        let left_node = if left_data.shape()[0] > 0 {
+            Some(Box::new(IsolationTree::new(&left_data, height + 1, max_height, rng)))
+        } else {
+            None
+        };
+        
+        let right_node = if right_data.shape()[0] > 0 {
+            Some(Box::new(IsolationTree::new(&right_data, height + 1, max_height, rng)))
+        } else {
+            None
+        };
+        
+        IsolationTree {
+            split_feature: Some(split_feature),
+            split_value: Some(split_value),
+            left: left_node,
+            right: right_node,
+            height,
+            size: n_samples,
+        }
+    }
+    
+    fn path_length(&self, point: ArrayView1<f64>, current_height: usize) -> f64 {
+        if self.left.is_none() && self.right.is_none() {
+            return current_height as f64;
+        }
+        
+        if let (Some(feature), Some(value)) = (self.split_feature, self.split_value) {
+            if point[feature] < value {
+                if let Some(ref left) = self.left {
+                    return left.path_length(point, current_height + 1);
+                }
+            } else {
+                if let Some(ref right) = self.right {
+                    return right.path_length(point, current_height + 1);
+                }
+            }
+        }
+        
+        current_height as f64
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct IsolationForest {
+    trees: Vec<IsolationTree>,
+    sample_size: usize,
+    n_estimators: usize,
+    max_height: usize,
+}
+
+impl IsolationForest {
+    fn new(n_estimators: usize, max_samples: Option<usize>) -> Self {
+        IsolationForest {
+            trees: Vec::with_capacity(n_estimators),
+            sample_size: max_samples.unwrap_or(256),
+            n_estimators,
+            max_height: 0, // Will be calculated during fit
+        }
+    }
+    
+    fn fit(&mut self, data: &Array2<f64>) {
+        let n_samples = data.shape()[0];
+        self.sample_size = self.sample_size.min(n_samples);
+        
+        // Calculate max_height based on sample size
+        self.max_height = (self.sample_size as f64).log2().ceil() as usize;
+        
+        let mut rng = thread_rng();
+        
+        for _ in 0..self.n_estimators {
+            // Sample data randomly
+            let mut sampled_indices = (0..n_samples).collect::<Vec<usize>>();
+            sampled_indices.shuffle(&mut rng);
+            sampled_indices.truncate(self.sample_size);
+            
+            let mut sampled_data = Array2::zeros((self.sample_size, data.shape()[1]));
+            for (i, &idx) in sampled_indices.iter().enumerate() {
+                sampled_data.row_mut(i).assign(&data.row(idx));
+            }
+            
+            // Build a tree
+            let tree = IsolationTree::new(&sampled_data, 0, self.max_height, &mut rng);
+            self.trees.push(tree);
+        }
+    }
+    
+    fn anomaly_score(&self, point: ArrayView1<f64>) -> f64 {
+        // Calculate average path length
+        let avg_path_length: f64 = self.trees.iter()
+            .map(|tree| tree.path_length(point, 0))
+            .sum::<f64>() / self.trees.len() as f64;
+        
+        // Calculate average path length for a successful search in a BST
+        let avg_unsuccessful_search = if self.sample_size > 2 {
+            let h = (self.sample_size as f64 - 1.0).ln() + 0.5772156649; // Euler's constant
+            2.0 * h - (2.0 * (self.sample_size as f64 - 1.0) / self.sample_size as f64)
+        } else {
+            1.0
+        };
+        
+        // Calculate anomaly score
+        2.0_f64.powf(-avg_path_length / avg_unsuccessful_search)
+    }
+    
+    fn predict(&self, data: &Array2<f64>, threshold: f64) -> Vec<i32> {
+        data.outer_iter()
+            .map(|point| {
+                let score = self.anomaly_score(point);
+                if score > threshold { -1 } else { 1 }
+            })
+            .collect()
+    }
+    
+    fn score_samples(&self, data: &Array2<f64>) -> Vec<f64> {
+        data.outer_iter()
+            .map(|point| self.anomaly_score(point))
+            .collect()
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SpatialSentry {
+    method: DetectionMethod,
+    contamination: f64,
+    n_estimators: usize,
+    isolation_forest: Option<IsolationForest>,
+    mahalanobis_background: Option<MahalanobisBackground>,
+    threshold: Option<f64>,
+}
+
+impl SpatialSentry {
+    fn new(method: DetectionMethod, contamination: f64, n_estimators: usize) -> Self {
+        SpatialSentry {
+            method,
+            contamination,
+            n_estimators,
+            isolation_forest: None,
+            mahalanobis_background: None,
+            threshold: None,
+        }
+    }
+    
+    fn fit(&mut self, data: &Array2<f64>) {
+        match self.method {
+            DetectionMethod::IsolationForest => {
+                let mut forest = IsolationForest::new(self.n_estimators, None);
+                forest.fit(data);
+                
+                // Calculate threshold based on contamination
+                let scores = forest.score_samples(data);
+                let mut score_vec = scores.clone();
+                score_vec.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let threshold_idx = ((1.0 - self.contamination) * scores.len() as f64) as usize;
+                self.threshold = Some(score_vec[threshold_idx.min(score_vec.len() - 1)]);
+                
+                self.isolation_forest = Some(forest);
+            },
+            DetectionMethod::Mahalanobis => {
+                let background = MahalanobisBackground::new(data);
+                
+                // Calculate Mahalanobis distances for training data
+                let distances: Vec<f64> = data.outer_iter()
+                    .map(|point| background.distance(point))
+                    .collect();
+                
+                // Set threshold at percentile corresponding to contamination
+                let mut dist_vec = distances.clone();
+                dist_vec.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let threshold_idx = ((1.0 - self.contamination) * distances.len() as f64) as usize;
+                self.threshold = Some(dist_vec[threshold_idx.min(dist_vec.len() - 1)]);
+                
+                self.mahalanobis_background = Some(background);
+            },
+            DetectionMethod::LocalOutlierFactor => {
+                // LOF implementation would go here
+                // For brevity, not implementing the full algorithm
+                panic!("LocalOutlierFactor not yet implemented");
+            }
+        }
+    }
+    
+    fn detect(&self, data: &Array2<f64>) -> Vec<i32> {
+        match self.method {
+            DetectionMethod::IsolationForest => {
+                if let (Some(forest), Some(threshold)) = (&self.isolation_forest, self.threshold) {
+                    forest.predict(data, threshold)
+                } else {
+                    panic!("Model not fitted");
+                }
+            },
+            DetectionMethod::Mahalanobis => {
+                if let (Some(background), Some(threshold)) = (&self.mahalanobis_background, self.threshold) {
+                    data.outer_iter()
+                        .map(|point| {
+                            let distance = background.distance(point);
+                            if distance > threshold { -1 } else { 1 }
+                        })
+                        .collect()
+                } else {
+                    panic!("Model not fitted");
+                }
+            },
+            DetectionMethod::LocalOutlierFactor => {
+                panic!("LocalOutlierFactor not yet implemented");
+            }
+        }
+    }
+    
+    fn anomaly_score(&self, data: &Array2<f64>) -> Vec<f64> {
+        match self.method {
+            DetectionMethod::IsolationForest => {
+                if let Some(forest) = &self.isolation_forest {
+                    forest.score_samples(data)
+                } else {
+                    panic!("Model not fitted");
+                }
+            },
+            DetectionMethod::Mahalanobis => {
+                if let Some(background) = &self.mahalanobis_background {
+                    data.outer_iter()
+                        .map(|point| background.distance(point))
+                        .collect()
+                } else {
+                    panic!("Model not fitted");
+                }
+            },
+            DetectionMethod::LocalOutlierFactor => {
+                panic!("LocalOutlierFactor not yet implemented");
+            }
+        }
+    }
+    
+    fn visualize_2d(&self, data: &Array2<f64>, labels: &[i32], output_path: &str) -> Result<(), Box<dyn Error>> {
+        if data.shape()[1] < 2 {
+            return Err("Data must have at least 2 dimensions for 2D visualization".into());
+        }
+        
+        let root = BitMapBackend::new(output_path, (800, 600)).into_drawing_area();
+        root.fill(&WHITE)?;
+        
+        let x_min = data.column(0).min().unwrap() - 1.0;
+        let x_max = data.column(0).max().unwrap() + 1.0;
+        let y_min = data.column(1).min().unwrap() - 1.0;
+        let y_max = data.column(1).max().unwrap() + 1.0;
+        
+        let mut chart = ChartBuilder::on(&root)
+            .caption("Spatial Anomaly Detection", ("sans-serif", 30).into_font())
+            .margin(10)
+            .x_label_area_size(30)
+            .y_label_area_size(30)
+            .build_cartesian_2d(x_min..x_max, y_min..y_max)?;
+        
+        chart.configure_mesh().draw()?;
+        
+        // Separate normal and anomaly points
+        let normal_points: Vec<(f64, f64)> = data.outer_iter()
+            .zip(labels.iter())
+            .filter(|(_, &label)| label == 1)
+            .map(|(point, _)| (point[0], point[1]))
+            .collect();
+        
+        let anomaly_points: Vec<(f64, f64)> = data.outer_iter()
+            .zip(labels.iter())
+            .filter(|(_, &label)| label == -1)
+            .map(|(point, _)| (point[0], point[1]))
+            .collect();
+        
+        // Draw normal points
+        chart.draw_series(normal_points.iter().map(|point| {
+            Circle::new(*point, 3, BLUE.mix(0.5).filled())
+        }))?
+        .label("Normal")
+        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], BLUE.mix(0.5)));
+        
+        // Draw anomaly points
+        chart.draw_series(anomaly_points.iter().map(|point| {
+            Circle::new(*point, 5, RED.filled())
+        }))?
+        .label("Anomaly")
+        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], RED));
+        
+        chart.configure_series_labels()
+            .background_style(WHITE.filled())
+            .border_style(BLACK)
+            .draw()?;
+        
+        root.present()?;
+        
+        Ok(())
+    }
+    
+    fn save_model(&self, path: &str) -> Result<(), Box<dyn Error>> {
+        let serialized = serde_json::to_string(self)?;
+        let mut file = File::create(path)?;
+        file.write_all(serialized.as_bytes())?;
+        Ok(())
+    }
+    
+    fn load_model(path: &str) -> Result<Self, Box<dyn Error>> {
+        let mut file = File::open(path)?;
+        let mut contents = String::new();
+        file.read_to_string(&mut contents)?;
+        let model: Self = serde_json::from_str(&contents)?;
+        Ok(model)
+    }
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    // Generate sample data with spatial anomalies
+    let mut rng = thread_rng();
+    
+    // Normal cluster
+    let n_normal = 300;
+    let normal_dist = Normal::new(0.0, 1.0)?;
+    
+    let mut normal_data = Array2::zeros((n_normal, 2));
+    for i in 0..n_normal {
+        // Generate correlated data
+        let x = normal_dist.sample(&mut rng);
+        let y = 0.5 * x + 0.5 * normal_dist.sample(&mut rng);
+        normal_data[[i, 0]] = x;
+        normal_data[[i, 1]] = y;
+    }
+    
+    // Anomalies
+    let n_anomalies = 15;
+    let uniform_dist = Uniform::new(-10.0, 10.0);
+    
+    let mut anomalies = Array2::zeros((n_anomalies, 2));
+    for i in 0..10 {
+        // Random outliers
+        anomalies[[i, 0]] = uniform_dist.sample(&mut rng);
+        anomalies[[i, 1]] = uniform_dist.sample(&mut rng);
+    }
+    
+    // Small cluster of anomalies
+    let anomaly_cluster_dist = Normal::new(5.0, 0.3);
+    for i in 10..n_anomalies {
+        anomalies[[i, 0]] = anomaly_cluster_dist.sample(&mut rng);
+        anomalies[[i, 1]] = anomaly_cluster_dist.sample(&mut rng);
+    }
+    
+    // Combine data
+    let n_total = n_normal + n_anomalies;
+    let mut data = Array2::zeros((n_total, 2));
+    for i in 0..n_normal {
+        data.row_mut(i).assign(&normal_data.row(i));
+    }
+    for i in 0..n_anomalies {
+        data.row_mut(i + n_normal).assign(&anomalies.row(i));
+    }
+    
+    // True labels
+    let mut true_labels = vec![1; n_normal];
+    true_labels.extend(vec![-1; n_anomalies]);
+    
+    // Initialize and train detector
+    let mut detector = SpatialSentry::new(
+        DetectionMethod::IsolationForest, 
+        0.05, 
+        100
+    );
+    
+    // Train only on normal data
+    detector.fit(&normal_data);
+    
+    // Detect anomalies
+    let pred_labels = detector.detect(&data);
+    
+    // Visualize results
+    detector.visualize_2d(&data, &pred_labels, "detected_anomalies.png")?;
+    detector.visualize_2d(&data, &true_labels, "true_anomalies.png")?;
+    
+    // Save model
+    detector.save_model("spatial_sentry_model.json")?;
+    
+    println!("Detection complete. Results saved to 'detected_anomalies.png' and 'true_anomalies.png'");
+    
+    Ok(())
+}
