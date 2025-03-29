@@ -1,44 +1,46 @@
 # SpatialSentry
 
-<p align="center">
-  <img src="docs/images/logo.png" alt="SpatialSentry Logo" width="200"/>
-</p>
+## High-Performance Spatial Anomaly Detection
 
-[![Crates.io](https://img.shields.io/crates/v/spatial_sentry.svg)](https://crates.io/crates/spatial_sentry)
-[![Documentation](https://docs.rs/spatial_sentry/badge.svg)](https://docs.rs/spatial_sentry)
-[![Build Status](https://github.com/constanza/spatial_sentry/workflows/Rust/badge.svg)](https://github.com/constanza/spatial_sentry/actions)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-
-## 🌌 High-Performance Spatial Anomaly Detection
+### Version: Rust
+### License: MIT
 
 SpatialSentry is a Rust-based tool for detecting anomalies in spatial data. It leverages advanced algorithms to identify unusual patterns or outlier locations that may indicate important phenomena across geographic, astronomical, or any coordinate-based data.
 
+---
+
 ## 🚀 Features
 
-- **Multiple Detection Algorithms**: Isolation Forest, Mahalanobis Distance, with more coming soon
-- **High Performance**: Optimized Rust implementation for speed and memory efficiency
-- **Visualization Tools**: Generate plots to visualize detected anomalies
-- **Serialization**: Save and load trained models
-- **Easy API**: Simple interface for integration with existing systems
+- **Multiple Detection Algorithms:** Isolation Forest, Mahalanobis Distance, with more coming soon.
+- **High Performance:** Optimized Rust implementation for speed and memory efficiency.
+- **Visualization Tools:** Generate plots to visualize detected anomalies.
+- **Serialization:** Save and load trained models.
+- **Easy API:** Simple interface for integration with existing systems.
+
+---
 
 ## 📦 Installation
 
-Add SpatialSentry to your Cargo.toml:
+Add SpatialSentry to your `Cargo.toml`:
 
 ```toml
 [dependencies]
 spatial_sentry = "0.1.0"
+```
+
 Or install the CLI tool:
 
-bash
-
-Hide
+```bash
 cargo install spatial_sentry
-🔧 Usage
-Basic Example
-rust
+```
 
-Hide
+---
+
+## 🔧 Usage
+
+### Basic Example
+
+```rust
 use spatial_sentry::{SpatialSentry, DetectionMethod};
 use ndarray::Array2;
 
@@ -69,35 +71,58 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     Ok(())
 }
-CLI Usage
-bash
+```
 
-Hide
+---
+
+### CLI Usage
+
+```bash
 # Analyze a CSV file with spatial data
 spatial_sentry analyze --input coords.csv --method isolation_forest --output results.png
 
 # Generate a heatmap of anomaly density
 spatial_sentry heatmap --input coords.csv --resolution 200 --output heatmap.png
-📊 Visualization Examples
+```
+
+---
+
+## 📊 Visualization Examples
+
 <p align="center">
   <img src="docs/images/example_detection.png" alt="Example Detection" width="400"/>
   <img src="docs/images/example_heatmap.png" alt="Example Heatmap" width="400"/>
 </p>
-🔍 Use Cases
-Cybersecurity: Detect anomalous network traffic patterns
-Astronomy: Identify unusual celestial phenomena
-GIS: Find geographic outliers in spatial datasets
-Surveillance: Spot unusual movement patterns
-IoT: Detect anomalies in sensor networks
-📚 Documentation
-For detailed documentation, visit docs.rs/spatial_sentry.
 
-🔬 Algorithm Details
+---
+
+## 🔍 Use Cases
+
+- **Cybersecurity:** Detect anomalous network traffic patterns.
+- **Astronomy:** Identify unusual celestial phenomena.
+- **GIS:** Find geographic outliers in spatial datasets.
+- **Surveillance:** Spot unusual movement patterns.
+- **IoT:** Detect anomalies in sensor networks.
+
+---
+
+## 📚 Documentation
+
+For detailed documentation, visit [docs.rs/spatial_sentry](https://docs.rs/spatial_sentry).
+
+---
+
+## 🔬 Algorithm Details
+
 SpatialSentry includes implementations of:
 
-Isolation Forest: An ensemble method that isolates anomalies through recursive partitioning
-Mahalanobis Distance: A statistical measure that accounts for correlations in multivariate data
-Coming Soon: Local Outlier Factor (LOF) and DBSCAN-based anomaly detection
-📄 License
+- **Isolation Forest:** An ensemble method that isolates anomalies through recursive partitioning.
+- **Mahalanobis Distance:** A statistical measure that accounts for correlations in multivariate data.
+- **Coming Soon:** Local Outlier Factor (LOF) and DBSCAN-based anomaly detection.
+
+---
+
+## 📄 License
+
 This project is licensed under the MIT License - see the LICENSE file for details.
 
